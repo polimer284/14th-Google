@@ -5,6 +5,8 @@ import plotly.express as px
 from datetime import datetime, timedelta
 import numpy as np
 import random
+import gspread
+from google.oauth2.service_account import Credentials
 
 # Page configuration
 st.set_page_config(
@@ -64,7 +66,6 @@ LOCATION_CAPS = {
     "Denver": 40,
     "Tampa": 10,
     "San Francisco": 2,
-    # Default cap for other locations
     "default": 3
 }
 
@@ -72,7 +73,60 @@ def get_location_cap(location):
     """Get capacity cap for a location"""
     return LOCATION_CAPS.get(location, LOCATION_CAPS["default"])
 
-# Updated sample data with multiple locations
+# Google Sheets connection
+@st.cache_resource
+def get_gsheet_connection():
+    """Connect to Google Sheets using service account credentials"""
+    try:
+        scope = [
+            'https://spreadsheets.google.com/feeds',
+            'https://www.googleapis.com/auth/drive'
+        ]
+        
+        # Get credentials from Streamlit secrets
+        creds = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=scope
+        )
+        
+        client = gspread.authorize(creds)
+        return client
+    except Exception as e:
+        st.error(f"❌ Google Sheets 연결 실패: {e}")
+        return None
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def load_data_from_gsheet():
+    """Load data from Google Sheets"""
+    try:
+        client = get_gsheet_connection()
+        if client is None:
+            return None
+        
+        # Get the sheet URL or ID from secrets
+        sheet_url = st.secrets.get("gsheet_url", "")
+        
+        if not sheet_url:
+            st.error("❌ Google Sheet URL이 설정되지 않았습니다.")
+            return None
+        
+        # Open the sheet
+        sheet = client.open_by_url(sheet_url).sheet1
+        
+        # Get all records
+        records = sheet.get_all_records()
+        
+        if not records:
+            st.warning("⚠️ Google Sheet에 데이터가 없습니다.")
+            return None
+        
+        return records
+        
+    except Exception as e:
+        st.error(f"❌ 데이터 로드 실패: {e}")
+        return None
+
+# Sample data for fallback
 def generate_sample_data():
     locations = ["Denver", "New York", "Los Angeles", "Chicago", "Boston"]
     sample_times = [
@@ -83,7 +137,6 @@ def generate_sample_data():
     sample_dates = ["9/28/25", "9/29/25", "9/30/25"]
     
     data = []
-    # Generate data for multiple locations
     for location in locations:
         num_records = 40 if location == "Denver" else random.randint(15, 35)
         for i in range(num_records):
@@ -120,7 +173,6 @@ def extract_date_only(datetime_str):
     """Extract date in M/D format from datetime string"""
     dt = parse_datetime(datetime_str)
     if dt:
-        # Windows compatible format
         return f"{dt.month}/{dt.day}"
     return ""
 
@@ -157,11 +209,9 @@ def sort_reservations_by_time(data):
 
 def calculate_time_slots(data, start_hour=8, end_hour=18, selected_location_date=None):
     """Calculate reservation status by time slots"""
-    # Filter by location+date if selected
     if selected_location_date and selected_location_date != "All Dates":
         data = [item for item in data if item['location_date'] == selected_location_date]
     
-    # Create 10-minute interval time slots
     time_slots = []
     for hour in range(start_hour, end_hour):
         for minute in range(0, 60, 10):
@@ -173,7 +223,6 @@ def calculate_time_slots(data, start_hour=8, end_hour=18, selected_location_date
                 'reservations': []
             })
     
-    # Filter reservations that have any overlap with the time range
     start_minutes = start_hour * 60
     end_minutes = end_hour * 60
     
@@ -186,7 +235,6 @@ def calculate_time_slots(data, start_hour=8, end_hour=18, selected_location_date
         if reservation_end > start_minutes and reservation_start < end_minutes:
             filtered_data.append(item)
     
-    # Calculate slot occupancy for filtered reservations
     for item in filtered_data:
         original_minutes = time_to_minutes(item['time'])
         start_minutes_res = original_minutes - 30
@@ -204,79 +252,12 @@ def calculate_time_slots(data, start_hour=8, end_hour=18, selected_location_date
     
     return time_slots, filtered_data
 
-def calculate_max_overlap_per_location_date(data, start_hour=8, end_hour=18):
-    """Calculate maximum overlap for each location-date separately"""
-    # Group data by location_date
-    location_date_groups = {}
-    for item in data:
-        location_date = item['location_date']
-        if location_date not in location_date_groups:
-            location_date_groups[location_date] = []
-        location_date_groups[location_date].append(item)
-    
-    max_overlaps = {}
-    
-    # Calculate max overlap for each location-date
-    for location_date, location_date_data in location_date_groups.items():
-        # Create time slots for this location-date only
-        time_slots, _ = calculate_time_slots(location_date_data, start_hour, end_hour)
-        
-        # Find maximum overlap for this location-date
-        max_overlap = max([slot['count'] for slot in time_slots]) if time_slots else 0
-        max_overlaps[location_date] = max_overlap
-    
-    # Return the overall maximum across all location-dates
-    return max(max_overlaps.values()) if max_overlaps else 0
-
-def analyze_busiest_hours(data, start_hour=8, end_hour=18):
-    """Analyze busiest 1-hour time slots"""
-    # Create time slots
-    time_slots, _ = calculate_time_slots(data, start_hour, end_hour)
-    
-    # Group by 1-hour intervals (6 slots = 60 minutes)
-    hourly_stats = {}
-    
-    for i in range(0, len(time_slots), 6):  # Every 6 slots = 1 hour
-        hour_slots = time_slots[i:i+6]
-        if not hour_slots:
-            continue
-            
-        start_time = hour_slots[0]['time']
-        # Calculate end time (1 hour later)
-        start_minutes = time_to_minutes(start_time)
-        end_minutes = start_minutes + 60
-        end_time = minutes_to_time(end_minutes)
-        
-        # Calculate total overlaps in this hour
-        total_overlap = sum(slot['count'] for slot in hour_slots)
-        max_overlap = max(slot['count'] for slot in hour_slots) if hour_slots else 0
-        
-        # Count how many 10-min slots are "busy" (have overlaps)
-        busy_slots = sum(1 for slot in hour_slots if slot['count'] > 0)
-        
-        hourly_stats[f"{start_time} - {end_time}"] = {
-            'total_overlap': total_overlap,
-            'max_overlap': max_overlap,
-            'busy_slots': busy_slots,
-            'start_time': start_time
-        }
-    
-    # Sort by total overlap (descending) and get top 4
-    sorted_hours = sorted(hourly_stats.items(), 
-                         key=lambda x: (x[1]['total_overlap'], x[1]['max_overlap']), 
-                         reverse=True)
-    
-    return sorted_hours[:4]
-
 def create_heatmap(time_slots, data, selected_location_date=None, selected_location=None):
     """Create heatmap chart grouped by location-date with expandable details"""
-    # Get location cap
     location_cap = get_location_cap(selected_location) if selected_location else LOCATION_CAPS["default"]
     
-    # Prepare time-based data
     times = [slot['time'] for slot in time_slots]
     
-    # Group data by location_date
     location_date_groups = {}
     for item in data:
         location_date = item['location_date']
@@ -284,26 +265,19 @@ def create_heatmap(time_slots, data, selected_location_date=None, selected_locat
             location_date_groups[location_date] = []
         location_date_groups[location_date].append(item)
     
-    # Sort location-dates by date (earliest first)
     sorted_location_dates = sorted(location_date_groups.keys(), 
                                    key=lambda ld: extract_full_date(location_date_groups[ld][0]['datetime']))
     
-    # Create summary heatmap (only totals)
     z_data_summary = []
     y_labels_summary = []
     
-    # **NEW: Calculate average row for each time slot**
     num_dates = len(sorted_location_dates)
     average_row = [0] * len(time_slots)
     
-# Process each location-date - only totals (reversed to show earliest at top)
     for location_date in reversed(sorted_location_dates):
         location_date_items = location_date_groups[location_date]
-        
-        # Get day of week from first item in this location_date group
         day_of_week = location_date_items[0].get('day_of_week', '')
         
-        # Calculate location-date total row
         location_date_total_row = [0] * len(time_slots)
         for item in location_date_items:
             original_minutes = time_to_minutes(item['time'])
@@ -315,30 +289,24 @@ def create_heatmap(time_slots, data, selected_location_date=None, selected_locat
                 if start_minutes <= slot_minutes < end_minutes:
                     location_date_total_row[i] += 1
         
-        # **NEW: Add to average calculation**
         for i in range(len(time_slots)):
             average_row[i] += location_date_total_row[i]
         
-        # Add location-date total row with date and day of week
         z_data_summary.append(location_date_total_row)
         y_labels_summary.append(f"📅 {location_date} ({day_of_week})")
     
-    # **NEW: Calculate final average and add as first row (정수로 변환)**
     if num_dates > 0:
         average_row = [round(val / num_dates) for val in average_row]
     
-    # Add average row at the END (so it appears at TOP)
     z_data_summary.append(average_row)
     y_labels_summary.append(f"📊 Average (across {num_dates} days)")
     
     average_row_index = len(y_labels_summary) - 1
     
-    # **UPDATED: Create text array with black color for average row**
     text_data = []
     for j, row in enumerate(z_data_summary):
         text_data.append([str(val) if val > 0 else '' for val in row])
     
-    # Main heatmap - no text (we'll add it via annotations)
     fig_summary = go.Figure(data=go.Heatmap(
         z=z_data_summary,
         x=times,
@@ -350,148 +318,106 @@ def create_heatmap(time_slots, data, selected_location_date=None, selected_locat
         ],
         showscale=False,
         text=text_data,
-        texttemplate="",  # Don't show text from heatmap
+        texttemplate="",
         hoverongaps=False,
         hovertemplate="<b>%{y}</b><br>Time: %{x}<br>Reservations: %{z}<extra></extra>"
     ))
     
-# Add vertical solid black lines at 1-hour intervals (on left edge of cells)
-    for i in range(0, len(times), 6):  # Every 6 slots = 1 hour (60 minutes)
-        x_pos = i - 0.5  # Position at left edge of cell
-        
+    for i in range(0, len(times), 6):
+        x_pos = i - 0.5
         fig_summary.add_shape(
             type="line",
-            x0=x_pos,
-            x1=x_pos,
-            y0=-0.5,
-            y1=len(y_labels_summary) - 0.5,
-            line=dict(color="black", width=0.2),  # Solid black line
-            xref="x",
-            yref="y"
+            x0=x_pos, x1=x_pos,
+            y0=-0.5, y1=len(y_labels_summary) - 0.5,
+            line=dict(color="black", width=0.2),
+            xref="x", yref="y"
         )
     
-    # **NEW: Add horizontal lines above and below AVERAGE row**
-    # Line below AVERAGE row
     fig_summary.add_shape(
         type="line",
-        x0=-0.5,
-        x1=len(times) - 0.5,
-        y0=average_row_index - 0.5,
-        y1=average_row_index - 0.5,
+        x0=-0.5, x1=len(times) - 0.5,
+        y0=average_row_index - 0.5, y1=average_row_index - 0.5,
         line=dict(color="black", width=1),
-        xref="x",
-        yref="y"
+        xref="x", yref="y"
     )
     
-    # Line above AVERAGE row
     fig_summary.add_shape(
         type="line",
-        x0=-0.5,
-        x1=len(times) - 0.5,
-        y0=average_row_index + 0.5,
-        y1=average_row_index + 0.5,
+        x0=-0.5, x1=len(times) - 0.5,
+        y0=average_row_index + 0.5, y1=average_row_index + 0.5,
         line=dict(color="black", width=1),
-        xref="x",
-        yref="y"
+        xref="x", yref="y"
     )
     
-    # **NEW: Add separator lines above each Monday (except first occurrence)**
-    # This helps distinguish different weeks
     prev_day = None
     for j, label in enumerate(y_labels_summary):
-        # Extract day of week from label (e.g., "📅 9/28 (Mo)" -> "Mo")
         if "(" in label and ")" in label:
             day_part = label.split("(")[1].split(")")[0]
-            
-            # If this is Monday and not the first row
             if day_part == "Mo" and prev_day is not None:
-                # Draw separator line above this Monday
                 fig_summary.add_shape(
                     type="line",
-                    x0=-0.5,
-                    x1=len(times) - 0.5,
-                    y0=j + 0.5,
-                    y1=j + 0.5,
+                    x0=-0.5, x1=len(times) - 0.5,
+                    y0=j + 0.5, y1=j + 0.5,
                     line=dict(color="black", width=0.8),
-                    xref="x",
-                    yref="y"
+                    xref="x", yref="y"
                 )
-            
             prev_day = day_part
     
-    # **NEW: Add black borders around cells that exceed cap**
-    # Group consecutive cells that exceed cap
     for j, label in enumerate(y_labels_summary):
         i = 0
         while i < len(times):
             val = z_data_summary[j][i]
             if val >= location_cap:
-                # Found a cell that exceeds cap, find consecutive cells
                 start_i = i
                 while i < len(times) and z_data_summary[j][i] >= location_cap:
                     i += 1
                 end_i = i
                 
-                # Draw border around this group of cells
                 fig_summary.add_shape(
                     type="rect",
-                    x0=start_i - 0.5,
-                    x1=end_i - 0.5,
-                    y0=j - 0.5,
-                    y1=j + 0.5,
+                    x0=start_i - 0.5, x1=end_i - 0.5,
+                    y0=j - 0.5, y1=j + 0.5,
                     line=dict(color="black", width=1.5),
-                    fillcolor="rgba(0,0,0,0)",  # Transparent fill
-                    xref="x",
-                    yref="y"
+                    fillcolor="rgba(0,0,0,0)",
+                    xref="x", yref="y"
                 )
             else:
                 i += 1
     
-    # **NEW: Add outer border around entire heatmap**
     fig_summary.add_shape(
         type="rect",
-        x0=-0.5,
-        x1=len(times) - 0.5,
-        y0=-0.5,
-        y1=len(y_labels_summary) - 0.5,
+        x0=-0.5, x1=len(times) - 0.5,
+        y0=-0.5, y1=len(y_labels_summary) - 0.5,
         line=dict(color="black", width=0.5),
-        fillcolor="rgba(0,0,0,0)",  # Transparent fill
-        xref="x",
-        yref="y"
+        fillcolor="rgba(0,0,0,0)",
+        xref="x", yref="y"
     )
     
-    # **FIXED: Combine all annotations together**
     all_annotations = []
     
-    # Add text annotations for ALL cells with correct colors
     for j, label in enumerate(y_labels_summary):
         for i, time in enumerate(times):
             val = z_data_summary[j][i]
             if val > 0:
                 all_annotations.append(
                     dict(
-                        x=time,
-                        y=label,
+                        x=time, y=label,
                         text=str(int(val)),
                         showarrow=False,
                         font=dict(
                             size=12,
                             color="black" if j == average_row_index else "white"
                         ),
-                        xref="x",
-                        yref="y"
+                        xref="x", yref="y"
                     )
                 )
     
-    # Add top x-axis labels
     for i, time in enumerate(times):
-        if i % 3 == 0:  # Show every 3rd label (30-minute intervals)
+        if i % 3 == 0:
             all_annotations.append(
                 dict(
-                    x=time,
-                    y=1.02,
-                    xref='x',
-                    yref='paper',
+                    x=time, y=1.02,
+                    xref='x', yref='paper',
                     text=time,
                     showarrow=False,
                     textangle=45,
@@ -505,11 +431,10 @@ def create_heatmap(time_slots, data, selected_location_date=None, selected_locat
     if selected_location_date and selected_location_date != "All Dates":
         title += f" - {selected_location_date}"
     
-    # **FIXED: Single update_layout call with all annotations**
     fig_summary.update_layout(
         title=title,
         yaxis_title="Date",
-        height=max(400, (len(sorted_location_dates) + 1) * 50 + 150),  # +1 for average row
+        height=max(400, (len(sorted_location_dates) + 1) * 50 + 150),
         xaxis=dict(
             tickangle=45,
             tickmode='linear',
@@ -517,20 +442,16 @@ def create_heatmap(time_slots, data, selected_location_date=None, selected_locat
             side='bottom',
             title="Time"
         ),
-        yaxis=dict(
-            tickfont=dict(size=11)
-        ),
+        yaxis=dict(tickfont=dict(size=11)),
         margin=dict(l=120, r=50, t=70, b=100),
         showlegend=False,
-        annotations=all_annotations  # All annotations in one go!
+        annotations=all_annotations
     )
     
-    # Return sorted location-date groups to maintain order (reversed for display)
     sorted_location_date_groups = {ld: location_date_groups[ld] for ld in reversed(sorted_location_dates)}
     
     return fig_summary, sorted_location_date_groups
 
-# Main application
 def main():
     st.title("📅 Time Reservation Management System")
     st.markdown("**Visualizes reservation status with ±30 minute buffer time applied**")
@@ -538,15 +459,32 @@ def main():
     # Sidebar configuration
     st.sidebar.header("⚙️ Settings")
     
-    # Data input method selection
-    data_input_method = st.sidebar.radio(
-        "Data Input Method",
-        ["Use Sample Data", "Upload CSV File"]
+    # Data source selection
+    data_source = st.sidebar.radio(
+        "Data Source",
+        ["Google Sheets", "Sample Data", "Upload CSV"]
     )
     
-    data = DEFAULT_DATA.copy()
+    data = None
     
-    if data_input_method == "Upload CSV File":
+    if data_source == "Google Sheets":
+        with st.spinner("📊 Loading data from Google Sheets..."):
+            data = load_data_from_gsheet()
+            if data:
+                st.sidebar.success(f"✅ Loaded {len(data)} records from Google Sheets")
+                # Add refresh button
+                if st.sidebar.button("🔄 Refresh Data"):
+                    st.cache_data.clear()
+                    st.rerun()
+            else:
+                st.sidebar.warning("⚠️ Failed to load from Google Sheets. Using sample data.")
+                data = DEFAULT_DATA.copy()
+    
+    elif data_source == "Sample Data":
+        data = DEFAULT_DATA.copy()
+        st.sidebar.info(f"📊 Using sample data ({len(data)} records)")
+    
+    else:  # Upload CSV
         uploaded_file = st.sidebar.file_uploader("Select CSV file", type="csv")
         if uploaded_file is not None:
             try:
@@ -557,17 +495,25 @@ def main():
                     st.sidebar.success(f"✅ Loaded {len(data)} reservation records.")
                 else:
                     st.sidebar.error(f"❌ CSV file must contain columns: {', '.join(required_columns)}")
+                    data = DEFAULT_DATA.copy()
             except Exception as e:
                 st.sidebar.error(f"❌ File reading error: {e}")
-     
-# Process data: extract time and create location_date field (date only, no location name)
+                data = DEFAULT_DATA.copy()
+        else:
+            data = DEFAULT_DATA.copy()
+    
+    if not data:
+        st.error("❌ No data available")
+        return
+    
+    # Process data
     for item in data:
         item['time'] = extract_time_only(item['datetime'])
         item['date'] = extract_date_only(item['datetime'])
         item['day_of_week'] = get_day_of_week(item['datetime'])
-        item['location_date'] = item['date']  # Only date, no location name
+        item['location_date'] = item['date']
     
-    # Extract unique locations from data
+    # Extract unique locations
     all_locations = sorted(list(set([item['location'] for item in data])))
     default_location = "Denver" if "Denver" in all_locations else all_locations[0]
     
@@ -597,7 +543,7 @@ def main():
         st.sidebar.error("⚠️ End hour must be later than start hour.")
         return
     
-    # Location-Date filter (only for selected location)
+    # Location-Date filter
     location_dates = sorted(list(set([item['location_date'] for item in location_filtered_data])),
                            key=lambda ld: extract_full_date([item for item in location_filtered_data if item['location_date'] == ld][0]['datetime']))
     
@@ -619,14 +565,12 @@ def main():
         filtered_out = total_original - total_filtered
         st.info(f"ℹ️ {filtered_out} reservations are hidden (outside time range considering ±30min buffer)")
     
-# Weekly Average Heatmap
+    # Weekly Average Heatmap
     st.subheader("📊 Weekly Average Pattern")
     
-    # Calculate day-of-week averages
     day_order = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
-    day_counts = {day: {} for day in day_order}  # {day: {time_index: [values]}}
+    day_counts = {day: {} for day in day_order}
     
-    # Group data by day of week
     for item in reservation_data:
         day = item.get('day_of_week', '')
         if day not in day_order:
@@ -643,31 +587,26 @@ def main():
                     day_counts[day][i] = []
                 day_counts[day][i].append(1)
     
-# Calculate averages for each day-time combination
     times = [slot['time'] for slot in time_slots]
     z_data_weekly = []
     y_labels_weekly = []
     
-    for day in reversed(day_order):  # Reverse to show Mo at top
+    for day in reversed(day_order):
         row = []
         for i in range(len(time_slots)):
             if i in day_counts[day] and day_counts[day][i]:
-                # Calculate average with decimal (keep precision internally)
                 num_dates_for_day = len(set([item['date'] for item in reservation_data if item.get('day_of_week') == day]))
                 avg = sum(day_counts[day][i]) / num_dates_for_day if num_dates_for_day > 0 else 0
-                row.append(avg)  # Keep decimal for internal calculation
+                row.append(avg)
             else:
                 row.append(0)
         z_data_weekly.append(row)
         y_labels_weekly.append(day)
     
-    # Create text data for display (integers only)
     text_data_weekly = [[str(int(round(val))) if val > 0 else '' for val in row] for row in z_data_weekly]
     
-    # Get location cap
     location_cap = get_location_cap(selected_location)
     
-    # Create weekly heatmap
     fig_weekly = go.Figure(data=go.Heatmap(
         z=z_data_weekly,
         x=times,
@@ -684,7 +623,6 @@ def main():
         hovertemplate="<b>%{y}</b><br>Time: %{x}<br>Average: %{z:.1f}<extra></extra>"
     ))
     
-    # Add vertical lines at 1-hour intervals
     for i in range(0, len(times), 6):
         x_pos = i - 0.5
         fig_weekly.add_shape(
@@ -695,8 +633,6 @@ def main():
             xref="x", yref="y"
         )
     
-# Add black borders for cells exceeding cap
-    # For weekly average, use cap - 1 as threshold
     weekly_cap_threshold = max(1, location_cap - 1)
     
     for j, day in enumerate(y_labels_weekly):
@@ -720,7 +656,6 @@ def main():
             else:
                 i += 1
     
-    # Add text annotations
     annotations_weekly = []
     for j, day in enumerate(y_labels_weekly):
         for i, time in enumerate(times):
@@ -728,13 +663,12 @@ def main():
             if val > 0:
                 annotations_weekly.append(dict(
                     x=time, y=day,
-                    text=str(int(round(val))),  # Display as integer
+                    text=str(int(round(val))),
                     showarrow=False,
                     font=dict(size=12, color="white"),
                     xref="x", yref="y"
                 ))
     
-    # Add top x-axis labels
     for i, time in enumerate(times):
         if i % 3 == 0:
             annotations_weekly.append(dict(
@@ -783,13 +717,11 @@ def main():
     </div>
     """, unsafe_allow_html=True)
     
-    # Summary heatmap and location-date details
     if reservation_data:
         fig_summary, location_date_groups = create_heatmap(time_slots, reservation_data, 
                                                            None if selected_location_date == "All Dates" else selected_location_date,
                                                            selected_location)
         
-        # Display location cap info
         location_cap = get_location_cap(selected_location)
         st.info(f"📊 **{selected_location} Capacity Cap: {location_cap}** - Times exceeding cap are marked with black borders")
         
