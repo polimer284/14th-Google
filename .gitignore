@@ -1,0 +1,2 @@
+# Streamlit Secrets 파일 제외
+.streamlit/secrets.toml
