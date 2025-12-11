@@ -514,7 +514,14 @@ def main():
         item['location_date'] = item['date']
     
     # Extract unique locations
-    all_locations = sorted(list(set([item['location'] for item in data])))
+    # 수정된 코드: 데이터 개수가 많은 순서대로 정렬
+    location_counts = {}
+    for item in data:
+        location = item['location']
+        location_counts[location] = location_counts.get(location, 0) + 1
+
+    all_locations = sorted(location_counts.keys(), key=lambda x: location_counts[x], reverse=True)
+
     default_location = "Denver" if "Denver" in all_locations else all_locations[0]
     
     # Location selector
@@ -567,10 +574,10 @@ def main():
     
     # Weekly Average Heatmap
     st.subheader("📊 Weekly Average Pattern")
-    
+
     day_order = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
     day_counts = {day: {} for day in day_order}
-    
+
     for item in reservation_data:
         day = item.get('day_of_week', '')
         if day not in day_order:
@@ -586,30 +593,187 @@ def main():
                 if i not in day_counts[day]:
                     day_counts[day][i] = []
                 day_counts[day][i].append(1)
-    
+
     times = [slot['time'] for slot in time_slots]
+
+    # times_with_util 부분 수정
+    times_with_util = times + ["", "", "Util. Rate"]  # ← 빈 컬럼 2개 추가
+
     z_data_weekly = []
     y_labels_weekly = []
-    
-    for day in reversed(day_order):
+
+    location_cap = get_location_cap(selected_location)
+
+    # Mo, Tu, We, Th, Fr, Sa, Su 순서로 고정
+    for day in day_order:  # ← reversed 제거!
         row = []
+        total_util = 0
+        count_slots = len(time_slots)
+        
         for i in range(len(time_slots)):
             if i in day_counts[day] and day_counts[day][i]:
                 num_dates_for_day = len(set([item['date'] for item in reservation_data if item.get('day_of_week') == day]))
                 avg = sum(day_counts[day][i]) / num_dates_for_day if num_dates_for_day > 0 else 0
                 row.append(avg)
+                
+                util = (avg / location_cap * 100) if location_cap > 0 else 0
+                total_util += util
             else:
                 row.append(0)
+                total_util += 0
+        
+        avg_util = total_util / count_slots if count_slots > 0 else 0
+        row.append(0)
+        row.append(0)
+        row.append(avg_util)
+        
         z_data_weekly.append(row)
         y_labels_weekly.append(day)
-    
-    text_data_weekly = [[str(int(round(val))) if val > 0 else '' for val in row] for row in z_data_weekly]
-    
-    location_cap = get_location_cap(selected_location)
-    
+
+    # 각 시간대별 평균 Utilization Row 추가
+    time_util_row = []
+    for i in range(len(time_slots)):
+        # 각 시간 슬롯에 대해 모든 요일의 평균 예약 수 계산
+        slot_total = sum([z_data_weekly[j][i] for j in range(len(z_data_weekly))])
+        slot_avg = slot_total / len(day_order) if len(day_order) > 0 else 0
+        
+        # 평균 예약 수를 utilization %로 변환
+        util = (slot_avg / location_cap * 100) if location_cap > 0 else 0
+        time_util_row.append(util)
+
+    # 빈 컬럼 2개 추가
+    time_util_row.append(0)
+    time_util_row.append(0)
+
+    # 전체 평균 utilization (오른쪽 아래 코너)
+    overall_util = sum(time_util_row[:-2]) / len(time_util_row[:-2]) if len(time_util_row[:-2]) > 0 else 0
+    time_util_row.append(overall_util)
+
+    # Overall Avg row 추가
+    z_data_weekly.append(time_util_row)
+    y_labels_weekly.append("Util. Rate")
+
+    # z_data_weekly_display 수정 - Overall Avg row는 모두 0 (흰색 배경)
+    z_data_weekly_display = []
+    for row_idx, row in enumerate(z_data_weekly):
+        if row_idx == len(z_data_weekly) - 1:  # Overall Avg row
+            new_row = [0] * len(row)  # 전체를 0으로 (흰색 배경)
+        else:
+            new_row = row[:-3] + [0, 0, 0]
+        z_data_weekly_display.append(new_row)
+
+    # text_data_weekly 수정 - Overall Avg row는 utilization %로 표시
+    text_data_weekly = []
+    for row_idx, row in enumerate(z_data_weekly):
+        text_row = []
+        for col_idx, val in enumerate(row):
+            if row_idx == len(z_data_weekly) - 1:  # Overall Avg row
+                if col_idx == len(row) - 1:  # 오른쪽 아래 코너 (전체 평균)
+                    text_row.append(f"{int(round(val))}%" if val > 0 else '')
+                elif col_idx >= len(row) - 3:  # 빈 컬럼들
+                    text_row.append('')
+                else:  # 각 시간대 utilization - 30분 평균으로 표시
+                    if col_idx % 3 == 1:  # 30분의 중간 지점에만 표시 (08:10, 08:40 등)
+                        # 이전, 현재, 다음 값의 평균 계산
+                        avg_vals = []
+                        for offset in [-1, 0, 1]:
+                            idx = col_idx + offset
+                            if 0 <= idx < len(row) - 3:
+                                avg_vals.append(row[idx])
+                        avg_30min = sum(avg_vals) / len(avg_vals) if avg_vals else 0
+                        text_row.append(f"{int(round(avg_30min))}%" if avg_30min > 0 else '')
+                    else:
+                        text_row.append('')  # 다른 위치는 빈칸
+            else:  # 일반 요일 rows
+                if col_idx == len(row) - 1:  # Util Rate 컬럼
+                    text_row.append(f"{int(round(val))}%" if val > 0 else '')
+                elif col_idx >= len(row) - 3:  # 빈 컬럼들
+                    text_row.append('')
+                else:  # 일반 시간 슬롯
+                    text_row.append(str(int(round(val))) if val > 0 else '')
+        text_data_weekly.append(text_row)
+
+    # annotations 수정
+    annotations_weekly = []
+    for j, day in enumerate(y_labels_weekly):
+        for i in range(len(times_with_util)):
+            
+            # Overall Avg row 처리
+            if j == len(y_labels_weekly) - 1:  # Overall Avg row
+                if i == len(times_with_util) - 1:  # Util Rate 컬럼 (오른쪽 아래 코너)
+                    val = z_data_weekly[j][i]
+                    if val > 0:
+                        text = f"{int(round(val))}%"
+                        color = "black"
+                        annotations_weekly.append(dict(
+                            x=times_with_util[i], 
+                            y=day,
+                            text=text,
+                            showarrow=False,
+                            font=dict(size=12, color=color),
+                            xref="x", 
+                            yref="y",
+                            xanchor='center',
+                            yanchor='middle'
+                        ))
+                elif i < len(times) and i % 3 == 1:  # 30분의 중간 지점에만 표시 (08:10, 08:40 등)
+                    # 이전, 현재, 다음 값의 평균 계산
+                    avg_vals = []
+                    for offset in [-1, 0, 1]:
+                        idx = i + offset
+                        if 0 <= idx < len(times):
+                            avg_vals.append(z_data_weekly[j][idx])
+                    avg_30min = sum(avg_vals) / len(avg_vals) if avg_vals else 0
+                    
+                    if avg_30min > 0:
+                        text = f"{int(round(avg_30min))}%"
+                        color = "black"
+                        annotations_weekly.append(dict(
+                            x=times_with_util[i], 
+                            y=day,
+                            text=text,
+                            showarrow=False,
+                            font=dict(size=12, color=color),
+                            xref="x", 
+                            yref="y",
+                            xanchor='center',
+                            yanchor='middle'
+                        ))
+            else:  # 일반 요일 rows
+                if i == len(times_with_util) - 1:  # Util Rate 컬럼
+                    val = z_data_weekly[j][i]
+                    if val > 0:
+                        text = f"{int(round(val))}%"
+                        color = "black"
+                        annotations_weekly.append(dict(
+                            x=times_with_util[i], 
+                            y=day,
+                            text=text,
+                            showarrow=False,
+                            font=dict(size=12, color=color),
+                            xref="x", 
+                            yref="y",
+                            xanchor='center',
+                            yanchor='middle'
+                        ))
+                elif i < len(times):  # 일반 시간 슬롯만
+                    val = z_data_weekly[j][i]
+                    if val > 0:
+                        text = str(int(round(val)))
+                        color = "white"
+                        annotations_weekly.append(dict(
+                            x=times_with_util[i], 
+                            y=day,
+                            text=text,
+                            showarrow=False,
+                            font=dict(size=12, color=color),
+                            xref="x", 
+                            yref="y"
+                        ))
+
     fig_weekly = go.Figure(data=go.Heatmap(
-        z=z_data_weekly,
-        x=times,
+        z=z_data_weekly_display,
+        x=times_with_util,
         y=y_labels_weekly,
         colorscale=[
             [0, 'white'],
@@ -620,9 +784,20 @@ def main():
         text=text_data_weekly,
         texttemplate="",
         hoverongaps=False,
-        hovertemplate="<b>%{y}</b><br>Time: %{x}<br>Average: %{z:.1f}<extra></extra>"
+        hovertemplate="<b>%{y}</b><br>Time: %{x}<br>Value: %{z:.1f}<extra></extra>",
+        xgap=0,  # ← 추가: 수평 그리드 라인 제거
+        ygap=0   # ← 추가: 수직 그리드 라인도 제거
     ))
-    
+
+    # Add separator line above Overall Avg row
+    fig_weekly.add_shape(
+        type="line",
+        x0=-0.5, x1=len(times_with_util) - 0.5,
+        y0=-0.5, y1=-0.5,  # Overall Avg row 위
+        line=dict(color="black", width=0.2),
+        xref="x", yref="y"
+    )
+    # Add vertical lines every 6 time slots (every hour)
     for i in range(0, len(times), 6):
         x_pos = i - 0.5
         fig_weekly.add_shape(
@@ -632,12 +807,25 @@ def main():
             line=dict(color="black", width=0.2),
             xref="x", yref="y"
         )
-    
+
+    # Add separator line before Utilization Rate column
+    fig_weekly.add_shape(
+        type="line",
+        x0=len(times) - 0.5, x1=len(times) - 0.5,
+        y0=-0.5, y1=len(y_labels_weekly) - 0.5,
+        line=dict(color="black", width=0.2),
+        xref="x", yref="y"
+    )
+
     weekly_cap_threshold = max(1, location_cap - 1)
-    
+
     for j, day in enumerate(y_labels_weekly):
+        # Util. Rate 행은 검은색 박스 로직 제외
+        if j == len(y_labels_weekly) - 1:  # 마지막 행 (Util. Rate)
+            continue
+        
         i = 0
-        while i < len(times):
+        while i < len(times):  # Only check time slots, not utilization column
             val = z_data_weekly[j][i]
             if val >= weekly_cap_threshold:
                 start_i = i
@@ -655,20 +843,8 @@ def main():
                 )
             else:
                 i += 1
-    
-    annotations_weekly = []
-    for j, day in enumerate(y_labels_weekly):
-        for i, time in enumerate(times):
-            val = z_data_weekly[j][i]
-            if val > 0:
-                annotations_weekly.append(dict(
-                    x=time, y=day,
-                    text=str(int(round(val))),
-                    showarrow=False,
-                    font=dict(size=12, color="white"),
-                    xref="x", yref="y"
-                ))
-    
+
+    # Add time labels at the top
     for i, time in enumerate(times):
         if i % 3 == 0:
             annotations_weekly.append(dict(
@@ -681,19 +857,42 @@ def main():
                 yanchor='bottom',
                 font=dict(size=12.5)
             ))
-    
+
+    # Add "Util. Rate" label
+    annotations_weekly.append(dict(
+        x="Util. Rate", y=1.02,
+        xref='x', yref='paper',
+        text="Util. Rate",
+        showarrow=False,
+        textangle=45,
+        xanchor='center',
+        yanchor='bottom',
+        font=dict(size=12.5)
+    ))
+
     fig_weekly.update_layout(
         title="",
         xaxis_title="Time",
         yaxis_title="Day of Week",
         height=400,
-        xaxis=dict(tickangle=45, tickmode='linear', dtick=3, side='bottom'),
-        yaxis=dict(tickfont=dict(size=11)),
-        margin=dict(l=80, r=50, t=70, b=100),
+        xaxis=dict(
+            tickangle=45, 
+            tickmode='linear',
+            dtick=3,
+            side='bottom',
+            showgrid=False  # ← 추가
+        ),
+        yaxis=dict(
+            tickfont=dict(size=11),
+            showgrid=False,
+            autorange='reversed'  # 또는 categoryorder='array', categoryarray=y_labels_weekly
+        ),
+        margin=dict(l=80, r=20, t=70, b=100),  # ← r=20으로 변경
         showlegend=False,
-        annotations=annotations_weekly
+        annotations=annotations_weekly,
+        plot_bgcolor='white'  # ← 추가: 배경색 흰색
     )
-    
+
     st.plotly_chart(fig_weekly, use_container_width=True)
 
     # Main content - Reservation Chart
