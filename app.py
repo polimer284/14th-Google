@@ -58,6 +58,10 @@ st.markdown("""
 h1, h2, h3 {
     color: var(--secondary-color);
 }
+div[data-baseweb="select"] > div {
+    border: 2px solid #2c3e50 !important;
+    border-radius: 5px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -453,8 +457,8 @@ def create_heatmap(time_slots, data, selected_location_date=None, selected_locat
     return fig_summary, sorted_location_date_groups
 
 def main():
-    st.title("📅 Time Reservation Management System")
-    st.markdown("**Visualizes reservation status with ±30 minute buffer time applied**")
+    st.title("Concierge Time Table")
+    st.markdown("**Visualizes actions with ±30 minute buffer time applied**")
     
     # Sidebar configuration
     st.sidebar.header("⚙️ Settings")
@@ -524,18 +528,20 @@ def main():
 
     default_location = "Denver" if "Denver" in all_locations else all_locations[0]
     
-    # Location selector
-    selected_location = st.selectbox(
-        "📍 Select Location",
-        all_locations,
-        index=all_locations.index(default_location),
-        label_visibility="visible"
-    )
-    
+    # Location selector with custom styling
+    col1, col2, col3 = st.columns([2, 3, 7])  # 1:3:8 비율로 나누어 왼쪽 1/4만 사용
+
+    with col1:
+        st.markdown("**📍 Select Location**")
+        selected_location = st.selectbox(
+            "Select Location",
+            all_locations,
+            index=all_locations.index(default_location),
+            label_visibility="collapsed"  # 라벨 숨기기 (위에 별도로 표시)
+        )
+
     # Filter data by selected location
     location_filtered_data = [item for item in data if item['location'] == selected_location]
-    
-    st.sidebar.markdown(f"**Total records in {selected_location}:** {len(location_filtered_data)}")
     
     # Operating hours configuration
     st.sidebar.markdown("---")
@@ -564,16 +570,24 @@ def main():
     time_slots, reservation_data = calculate_time_slots(location_filtered_data, start_hour, end_hour, 
                                                          None if selected_location_date == "All Dates" else selected_location_date)
     
-    # Show filtering info
+    # Show combined location and filtering info
+    location_cap = get_location_cap(selected_location)
     total_filtered = len(reservation_data)
     total_original = len([item for item in location_filtered_data if selected_location_date == "All Dates" or item['location_date'] == selected_location_date])
-    
+
+    info_parts = [
+        f"**{selected_location} Capacity Cap: {location_cap}** - Times exceeding cap are marked with black borders",
+        f"**Total records in {selected_location}:** {len(location_filtered_data)}"
+    ]
+
     if total_filtered < total_original:
         filtered_out = total_original - total_filtered
-        st.info(f"ℹ️ {filtered_out} reservations are hidden (outside time range considering ±30min buffer)")
+        info_parts.append(f"**{filtered_out} reservations are hidden** (outside time range considering ±30min buffer)")
+
+    st.info("\n\n".join(info_parts))
     
     # Weekly Average Heatmap
-    st.subheader("📊 Weekly Average Pattern")
+    st.subheader("Weekly Average Pattern")
 
     day_order = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
     day_counts = {day: {} for day in day_order}
@@ -896,7 +910,7 @@ def main():
     st.plotly_chart(fig_weekly, use_container_width=True)
 
     # Main content - Reservation Chart
-    st.subheader(f"📊 Reservation Status: {selected_location}")
+    st.subheader(f"Daily Pattern: {selected_location}")
     
     # Legend
     st.markdown("""
@@ -920,10 +934,6 @@ def main():
         fig_summary, location_date_groups = create_heatmap(time_slots, reservation_data, 
                                                            None if selected_location_date == "All Dates" else selected_location_date,
                                                            selected_location)
-        
-        location_cap = get_location_cap(selected_location)
-        st.info(f"📊 **{selected_location} Capacity Cap: {location_cap}** - Times exceeding cap are marked with black borders")
-        
         st.plotly_chart(fig_summary, use_container_width=True)
         
     else:
