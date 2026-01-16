@@ -193,6 +193,41 @@ def extract_full_date(datetime_str):
     dt = parse_datetime(datetime_str)
     return dt if dt else datetime.min
 
+def get_week_start(date_obj):
+    """Get the Monday of the week for a given date"""
+    days_since_monday = date_obj.weekday()
+    monday = date_obj - timedelta(days=days_since_monday)
+    return monday
+
+def get_week_label(monday_date):
+    """Generate week label: 'Week 1: 12/1 - 12/7'"""
+    sunday = monday_date + timedelta(days=6)
+    return f"{monday_date.month}/{monday_date.day} - {sunday.month}/{sunday.day}"
+
+def get_all_weeks(data):
+    """Extract all unique weeks from data"""
+    weeks = {}
+    
+    for item in data:
+        dt = parse_datetime(item['datetime'])
+        if dt:
+            monday = get_week_start(dt)
+            week_key = monday.strftime("%Y-%m-%d")
+            
+            if week_key not in weeks:
+                weeks[week_key] = {
+                    'monday': monday,
+                    'label': get_week_label(monday),
+                    'dates': set()
+                }
+            
+            weeks[week_key]['dates'].add(item['date'])
+    
+    # Sort by week start date
+    sorted_weeks = sorted(weeks.items(), key=lambda x: x[1]['monday'])
+    
+    return sorted_weeks
+
 def time_to_minutes(time_str):
     """Convert time string to minutes"""
     try:
@@ -528,8 +563,8 @@ def main():
 
     default_location = "Denver" if "Denver" in all_locations else all_locations[0]
     
-    # Location selector with custom styling
-    col1, col2, col3 = st.columns([2, 3, 7])  # 1:3:8 비율로 나누어 왼쪽 1/4만 사용
+    # Location and Time Frame selectors
+    col1, col2, col3 = st.columns([3, 8, 3])
 
     with col1:
         st.markdown("**📍 Select Location**")
@@ -537,11 +572,47 @@ def main():
             "Select Location",
             all_locations,
             index=all_locations.index(default_location),
-            label_visibility="collapsed"  # 라벨 숨기기 (위에 별도로 표시)
+            label_visibility="collapsed"
         )
 
     # Filter data by selected location
     location_filtered_data = [item for item in data if item['location'] == selected_location]
+
+    # Get all weeks from the location-filtered data
+    all_weeks = get_all_weeks(location_filtered_data)
+
+    with col2:
+        st.markdown("**📅 Select Time Frame**")
+        
+        # Create options: individual weeks only (no "All Weeks" for multiselect)
+        week_options = []
+        week_mapping = {}
+        
+        for i, (week_key, week_info) in enumerate(all_weeks, 1):
+            week_label = f"Week {i}: {week_info['label']}"
+            week_options.append(week_label)
+            week_mapping[week_label] = week_info['dates']
+        
+        selected_weeks = st.multiselect(
+            "Select Time Frame",
+            week_options,
+            default=week_options,  # 기본값: 모든 주 선택
+            label_visibility="collapsed"
+        )
+
+    # Filter data by selected weeks
+    if not selected_weeks:  # 아무것도 선택 안 했을 때
+        week_filtered_data = []
+        selected_week_display = "None"
+    elif len(selected_weeks) == len(week_options):  # 모든 주 선택
+        week_filtered_data = location_filtered_data
+        selected_week_display = "All Weeks"
+    else:  # 일부 주 선택
+        selected_dates = set()
+        for week in selected_weeks:
+            selected_dates.update(week_mapping[week])
+        week_filtered_data = [item for item in location_filtered_data if item['date'] in selected_dates]
+        selected_week_display = f"{len(selected_weeks)} week(s) selected"
     
     # Operating hours configuration
     st.sidebar.markdown("---")
@@ -556,28 +627,17 @@ def main():
         st.sidebar.error("⚠️ End hour must be later than start hour.")
         return
     
-    # Location-Date filter
-    location_dates = sorted(list(set([item['location_date'] for item in location_filtered_data])),
-                           key=lambda ld: extract_full_date([item for item in location_filtered_data if item['location_date'] == ld][0]['datetime']))
-    
-    st.sidebar.markdown("---")
-    selected_location_date = st.sidebar.selectbox(
-        "📅 Filter by Date",
-        ["All Dates"] + location_dates
-    )
-    
     # Data processing
-    time_slots, reservation_data = calculate_time_slots(location_filtered_data, start_hour, end_hour, 
-                                                         None if selected_location_date == "All Dates" else selected_location_date)
+    time_slots, reservation_data = calculate_time_slots(week_filtered_data, start_hour, end_hour, None)
     
     # Show combined location and filtering info
     location_cap = get_location_cap(selected_location)
     total_filtered = len(reservation_data)
-    total_original = len([item for item in location_filtered_data if selected_location_date == "All Dates" or item['location_date'] == selected_location_date])
+    total_original = len(week_filtered_data)
 
     info_parts = [
         f"**{selected_location} Capacity Cap: {location_cap}** - Times exceeding cap are marked with black borders",
-        f"**Total records in {selected_location}:** {len(location_filtered_data)}"
+        f"**Total records:** {len(week_filtered_data)} (Time Frame: {selected_week_display})"
     ]
 
     if total_filtered < total_original:
@@ -932,8 +992,8 @@ def main():
     
     if reservation_data:
         fig_summary, location_date_groups = create_heatmap(time_slots, reservation_data, 
-                                                           None if selected_location_date == "All Dates" else selected_location_date,
-                                                           selected_location)
+                                                        None,
+                                                        selected_location)
         st.plotly_chart(fig_summary, use_container_width=True)
         
     else:
